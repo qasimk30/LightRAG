@@ -958,7 +958,6 @@ async def kg_query(
         query_param,
         chunks_vdb,
     )
-    print(context)
     if query_param.only_need_context:
         return context
     if context is None:
@@ -1977,7 +1976,6 @@ async def naive_query(
 ```
 
 """
-    print(text_units_str)
     # Process conversation history
     history_context = ""
     if query_param.conversation_history:
