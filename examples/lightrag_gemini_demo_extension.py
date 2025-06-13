@@ -109,7 +109,7 @@ def main():
     # rag.insert(text)
 
     response = rag.query(
-        query="What is multi tenancy feature?",
+        query="What is multi tenancy feature? Explain all details",
         param=QueryParam(mode="hybrid", top_k=60, response_type="single line"),
     )
 
