@@ -79,7 +79,7 @@ from dotenv import load_dotenv
 from llama_cloud_services import LlamaParse
 
 
-SCREENSHOT_DIR = "/Users/qasimsaeed/work/Vector/lightrag/LightRAG/screenshots"
+SCREENSHOT_DIR = "./screenshots"
 
 class LightRAG_EXTENSIONS(LightRAG):
     def __init__(self, *args, **kwargs):

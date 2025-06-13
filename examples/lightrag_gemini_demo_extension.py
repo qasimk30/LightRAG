@@ -109,7 +109,7 @@ def main():
     # rag.insert(text)
 
     response = rag.query(
-        query="What is screenshot feature?",
+        query="What is multi tenancy feature?",
         param=QueryParam(mode="hybrid", top_k=60, response_type="single line"),
     )
 
