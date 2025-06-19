@@ -1025,6 +1025,156 @@ async def kg_query(
 
     return response
 
+async def kg_query_chunks_only(
+    query: str,
+    knowledge_graph_inst: BaseGraphStorage,
+    entities_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    chunks_vdb: BaseVectorStorage = None,
+) -> str | None:
+    """
+    Retrieve chunks/context for a query without generating a response.
+    Returns the context string or None if no context could be built.
+    """
+    # Handle cache for chunks
+    args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, query, query_param.mode, cache_type="query"
+    )
+    if cached_response is not None and query_param.only_need_context:
+        return cached_response
+
+    hl_keywords, ll_keywords = await get_keywords_from_query(
+        query, query_param, global_config, hashing_kv
+    )
+
+    logger.debug(f"High-level keywords: {hl_keywords}")
+    logger.debug(f"Low-level  keywords: {ll_keywords}")
+
+    # Handle empty keywords
+    if hl_keywords == [] and ll_keywords == []:
+        logger.warning("low_level_keywords and high_level_keywords is empty")
+        return None
+    if ll_keywords == [] and query_param.mode in ["local", "hybrid"]:
+        logger.warning(
+            "low_level_keywords is empty, switching from %s mode to global mode",
+            query_param.mode,
+        )
+        query_param.mode = "global"
+    if hl_keywords == [] and query_param.mode in ["global", "hybrid"]:
+        logger.warning(
+            "high_level_keywords is empty, switching from %s mode to local mode",
+            query_param.mode,
+        )
+        query_param.mode = "local"
+
+    ll_keywords_str = ", ".join(ll_keywords) if ll_keywords else ""
+    hl_keywords_str = ", ".join(hl_keywords) if hl_keywords else ""
+
+    # Build context
+    context = await _build_query_context(
+        ll_keywords_str,
+        hl_keywords_str,
+        knowledge_graph_inst,
+        entities_vdb,
+        relationships_vdb,
+        text_chunks_db,
+        query_param,
+        chunks_vdb,
+    )
+    
+    return context
+
+
+async def kg_query_generate_response(
+    query: str,
+    context: str,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None,
+) -> str | AsyncIterator[str]:
+    """
+    Generate a response using the provided context and query.
+    """
+    if query_param.model_func:
+        use_model_func = query_param.model_func
+    else:
+        use_model_func = global_config["llm_model_func"]
+        # Apply higher priority (5) to query relation LLM function
+        use_model_func = partial(use_model_func, _priority=5)
+
+    if context is None:
+        return PROMPTS["fail_response"]
+
+    # Process conversation history
+    history_context = ""
+    if query_param.conversation_history:
+        history_context = get_conversation_turns(
+            query_param.conversation_history, query_param.history_turns
+        )
+
+    # Build system prompt
+    user_prompt = (
+        query_param.user_prompt
+        if query_param.user_prompt
+        else PROMPTS["DEFAULT_USER_PROMPT"]
+    )
+    sys_prompt_temp = system_prompt if system_prompt else PROMPTS_Extension["rag_response"]
+    sys_prompt = sys_prompt_temp.format(
+        context_data=context,
+        response_type=query_param.response_type,
+        history=history_context,
+        user_prompt=user_prompt,
+    )
+
+    if query_param.only_need_prompt:
+        return sys_prompt
+
+    tokenizer: Tokenizer = global_config["tokenizer"]
+    len_of_prompts = len(tokenizer.encode(query + sys_prompt))
+    logger.debug(f"[kg_query_generate_response]Prompt Tokens: {len_of_prompts}")
+
+    response = await use_model_func(
+        query,
+        system_prompt=sys_prompt,
+        stream=query_param.stream,
+    )
+    if isinstance(response, str) and len(response) > len(sys_prompt):
+        response = (
+            response.replace(sys_prompt, "")
+            .replace("user", "")
+            .replace("model", "")
+            .replace(query, "")
+            .replace("<system>", "")
+            .replace("</system>", "")
+            .strip()
+        )
+
+    if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
+        # Save to cache
+        args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+        await save_to_cache(
+            hashing_kv,
+            CacheData(
+                args_hash=args_hash,
+                content=response,
+                prompt=query,
+                quantized=None,  # These would need to be passed from chunks function if needed
+                min_val=None,
+                max_val=None,
+                mode=query_param.mode,
+                cache_type="query",
+            ),
+        )
+
+    return response
+
+
 
 async def get_keywords_from_query(
     query: str,
@@ -2038,6 +2188,172 @@ async def naive_query(
         )
 
     return response
+
+
+async def naive_query_chunks_only(
+    query: str,
+    chunks_vdb: BaseVectorStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+) -> str | None:
+    """
+    Retrieve chunks/context for a naive query without generating a response.
+    Returns the formatted context string or None if no context could be built.
+    """
+    # Handle cache for chunks
+    args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, query, query_param.mode, cache_type="query"
+    )
+    if cached_response is not None and query_param.only_need_context:
+        return cached_response
+
+    tokenizer: Tokenizer = global_config["tokenizer"]
+
+    _, _, text_units_context = await _get_vector_context(
+        query, chunks_vdb, query_param, tokenizer
+    )
+
+    if text_units_context is None or len(text_units_context) == 0:
+        return None
+
+    text_units_str = json.dumps(text_units_context, ensure_ascii=False)
+    return f"""
+---Document Chunks---
+
+```json
+{text_units_str}
+```
+
+"""
+
+
+async def naive_query_generate_response(
+    query: str,
+    context: str,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None,
+) -> str | AsyncIterator[str]:
+    """
+    Generate a response using the provided context and query for naive RAG.
+    """
+    if query_param.model_func:
+        use_model_func = query_param.model_func
+    else:
+        use_model_func = global_config["llm_model_func"]
+        # Apply higher priority (5) to query relation LLM function
+        use_model_func = partial(use_model_func, _priority=5)
+
+    if context is None:
+        return PROMPTS["fail_response"]
+
+    # Extract the JSON content from the formatted context
+    import re
+    json_match = re.search(r'```json\n(.*?)\n```', context, re.DOTALL)
+    text_units_str = json_match.group(1) if json_match else ""
+
+    # Process conversation history
+    history_context = ""
+    if query_param.conversation_history:
+        history_context = get_conversation_turns(
+            query_param.conversation_history, query_param.history_turns
+        )
+
+    # Build system prompt
+    user_prompt = (
+        query_param.user_prompt
+        if query_param.user_prompt
+        else PROMPTS["DEFAULT_USER_PROMPT"]
+    )
+    sys_prompt_temp = system_prompt if system_prompt else PROMPTS_Extension["naive_rag_response"]
+    sys_prompt = sys_prompt_temp.format(
+        content_data=text_units_str,
+        response_type=query_param.response_type,
+        history=history_context,
+        user_prompt=user_prompt,
+    )
+
+    if query_param.only_need_prompt:
+        return sys_prompt
+
+    tokenizer: Tokenizer = global_config["tokenizer"]
+    len_of_prompts = len(tokenizer.encode(query + sys_prompt))
+    logger.debug(f"[naive_query_generate_response]Prompt Tokens: {len_of_prompts}")
+
+    response = await use_model_func(
+        query,
+        system_prompt=sys_prompt,
+        stream=query_param.stream,
+    )
+
+    if isinstance(response, str) and len(response) > len(sys_prompt):
+        response = (
+            response[len(sys_prompt) :]
+            .replace(sys_prompt, "")
+            .replace("user", "")
+            .replace("model", "")
+            .replace(query, "")
+            .replace("<system>", "")
+            .replace("</system>", "")
+            .strip()
+        )
+
+    if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
+        # Save to cache
+        args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+        await save_to_cache(
+            hashing_kv,
+            CacheData(
+                args_hash=args_hash,
+                content=response,
+                prompt=query,
+                quantized=None,  # These would need to be passed from chunks function if needed
+                min_val=None,
+                max_val=None,
+                mode=query_param.mode,
+                cache_type="query",
+            ),
+        )
+
+    return response
+
+
+async def naive_query(
+    query: str,
+    chunks_vdb: BaseVectorStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None,
+) -> str | AsyncIterator[str]:
+    """
+    Main function that orchestrates the naive query process by calling the two separate functions.
+    """
+    # Get chunks/context
+    context = await naive_query_chunks_only(
+        query=query,
+        chunks_vdb=chunks_vdb,
+        query_param=query_param,
+        global_config=global_config,
+        hashing_kv=hashing_kv,
+    )
+    
+    if query_param.only_need_context:
+        return context if context is not None else PROMPTS["fail_response"]
+    
+    # Generate response
+    return await naive_query_generate_response(
+        query=query,
+        context=context,
+        query_param=query_param,
+        global_config=global_config,
+        hashing_kv=hashing_kv,
+        system_prompt=system_prompt,
+    )
+
 
 
 # TODO: Deprecated, use user_prompt in QueryParam instead

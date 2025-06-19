@@ -21,6 +21,7 @@ load_dotenv()
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 
 WORKING_DIR = "./dickens"
+SCREENSHOT_DIR = "./screenshots"
 
 if os.path.exists(WORKING_DIR):
     import shutil
@@ -71,6 +72,7 @@ async def embedding_func(texts: list[str]) -> np.ndarray:
 async def initialize_rag():
     rag = LightRAG_EXTENSIONS(
         working_dir=WORKING_DIR,
+        screenshot_path=SCREENSHOT_DIR,
         llm_model_func=llm_model_func,
         embedding_func=EmbeddingFunc(
             embedding_dim=384,
@@ -88,28 +90,12 @@ async def initialize_rag():
 def main():
     # Initialize RAG instance
     rag = asyncio.run(initialize_rag())
-    import fitz  # PyMuPDF
-
-    file_path = "Sinjun AI Custom RAG.pdf"
-    text = ""
-
-    with fitz.open(file_path) as doc:
-        for page in doc:
-            text += page.get_text()
-
-    # Now insert the extracted text
-    # File Path is must in this version, optional in original lightrag
-    rag.insert(text, file_paths = file_path)
-
-    # rag = asyncio.run(initialize_rag())
-    # file_path = "wizard_of_oz.txt"
-    # with open(file_path, "r") as file:
-    #     text = file.read()
-
-    # rag.insert(text)
+    file_path = ""
+    # Only file path is needed, no option for parsing text.
+    rag.insert(file_paths = file_path)
 
     response = rag.query(
-        query="What is multi tenancy feature? Explain all details",
+        query="What is mcp server feature?",
         param=QueryParam(mode="hybrid", top_k=60, response_type="single line"),
     )
 

@@ -33,6 +33,7 @@ When handling relationships with timestamps:
 - Ensure the response maintains continuity with the conversation history.
 - List up to 5 most important reference sources at the end under "References" section. Clearly indicating whether each source is from Knowledge Graph (KG) or Document Chunks (DC), and include the file path if available, in the following format: [KG/DC] file_path.
 - Provide up to 5 most important screenshot citations under "Citations" section. Include screenshots where screenshots_path is not None.
+- Provide upto 5 most important screenshots and thier relevance score (weight) under "Relevance" section. In fomrat screenshots - weight.
 - If you don't know the answer, just say so.
 - Do not make anything up. Do not include information not provided by the Knowledge Base.
 - Addtional user prompt: {user_prompt}
@@ -67,6 +68,7 @@ When handling content with timestamps:
 - Ensure the response maintains continuity with the conversation history.
 - List up to 5 most important reference sources at the end under "References" section. Clearly indicating each source from Document Chunks(DC), and include the file path if available, in the following format: [DC] file_path.
 - Provide up to 5 most important screenshot citations under "Citations" section. Include screenshots where screenshots_path is not None.
+- Provide upto 5 most important screenshots and thier relevance score (weight) under "Relevance" section. In fomrat screenshots - weight.
 - If you don't know the answer, just say so.
 - Do not include information not provided by the Document Chunks.
 - Addtional user prompt: {user_prompt}

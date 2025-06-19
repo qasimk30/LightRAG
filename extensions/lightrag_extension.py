@@ -56,6 +56,10 @@ from extensions.operate_extension import (
     kg_query,
     naive_query,
     query_with_keywords,
+    kg_query_chunks_only,
+    kg_query_generate_response,
+    naive_query_chunks_only,
+    naive_query_generate_response,
 )
 from lightrag.prompt import GRAPH_FIELD_SEP
 from lightrag.utils import (
@@ -78,12 +82,11 @@ from dotenv import load_dotenv
 
 from llama_cloud_services import LlamaParse
 
-
-SCREENSHOT_DIR = "./screenshots"
-
-
 class LightRAG_EXTENSIONS(LightRAG):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, screenshot_path=None, **kwargs):
+        self.screenshot_dir = screenshot_path
+
+        # Call the original LightRAG initializer with the rest of the args
         super().__init__(*args, **kwargs)
         self.entities_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=make_namespace(
@@ -117,18 +120,40 @@ class LightRAG_EXTENSIONS(LightRAG):
             take_screenshot=True, 
         )
 
-    async def ainsert(
+    def insert(
         self,
-        input: str | list[str],
+        file_paths: str | list[str],
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
         ids: str | list[str] | None = None,
-        file_paths: str | list[str] | None = None,
+    ) -> None:
+        """Sync Insert documents with checkpoint support
+
+        Args:
+            split_by_character: if split_by_character is not None, split the string by character, if chunk longer than
+            chunk_token_size, it will be split again by token size.
+            split_by_character_only: if split_by_character_only is True, split the string by character only, when
+            split_by_character is None, this parameter is ignored.
+            ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
+            file_paths: single string of the file path or list of file paths, used for citation
+        """
+        loop = always_get_an_event_loop()
+        loop.run_until_complete(
+            self.ainsert(
+               file_paths,  split_by_character, split_by_character_only, ids
+            )
+        )
+
+    async def ainsert(
+        self,
+        file_paths: str | list[str],
+        split_by_character: str | None = None,
+        split_by_character_only: bool = False,
+        ids: str | list[str] | None = None,
     ) -> None:
         """Async Insert documents with checkpoint support
 
         Args:
-            input: Single document string or list of document strings
             split_by_character: if split_by_character is not None, split the string by character, if chunk longer than
             chunk_token_size, it will be split again by token size.
             split_by_character_only: if split_by_character_only is True, split the string by character only, when
@@ -136,15 +161,133 @@ class LightRAG_EXTENSIONS(LightRAG):
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
         """
-        await self.apipeline_enqueue_documents(input, ids, file_paths)
+        await self.apipeline_enqueue_documents(file_paths, ids)
         await self.apipeline_process_enqueue_documents(
-            split_by_character, split_by_character_only, file_paths
+            file_paths, split_by_character, split_by_character_only
         )
+
+    async def apipeline_enqueue_documents(
+        self,
+        file_paths: str | list[str],
+        ids: list[str] | None = None,
+    ) -> None:
+        """
+        Pipeline for Processing Documents
+
+        1. Validate ids if provided or generate MD5 hash IDs
+        2. Remove duplicate contents
+        3. Generate document initial status
+        4. Filter out already processed documents
+        5. Enqueue document in status
+
+        Args:
+            file_paths: list of file paths corresponding to each document, used for citation
+            ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
+        """
+
+        if isinstance(ids, str):
+            ids = [ids]
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+
+        # 1. Validate ids if provided or generate MD5 hash IDs
+        if ids is not None:
+            # Check if IDs are unique
+            if len(ids) != len(set(ids)):
+                raise ValueError("IDs must be unique")
+
+            # Generate contents dict of IDs provided by user and documents
+            contents = {
+                id_: {"file_path": path}
+                for id_, path in zip(ids, file_paths)
+            }
+        else:
+            # Clean input text and remove duplicates
+            cleaned_input = [
+                path for path in file_paths
+            ]
+            unique_content_with_paths = []
+
+            # Keep track of unique content and their paths
+            for path in cleaned_input:
+                if path not in unique_content_with_paths:
+                    unique_content_with_paths.append(path)
+
+            # Generate contents dict of MD5 hash IDs and documents with paths
+            contents = {
+                compute_mdhash_id(path, prefix="doc-"): {
+                    "file_path": path,
+                }
+                for path in unique_content_with_paths
+            }
+
+        # 2. Remove duplicate contents
+        unique_paths = {}
+        for id_, content_data in contents.items():
+            file_path = content_data["file_path"]
+            if file_path not in unique_paths:
+                unique_paths[file_path] = (id_)
+
+        # Reconstruct contents with unique content
+        contents = {
+            id_: {"file_path": file_path}
+            for  file_path, id_ in unique_paths.items()
+        }
+
+        # 3. Generate document initial status
+        new_docs: dict[str, Any] = {
+            id_: {
+                "status": DocStatus.PENDING,
+                "content": content_data["file_path"],
+                "content_summary": get_content_summary(content_data["file_path"]),
+                "content_length": len(content_data["file_path"]),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "file_path": content_data[
+                    "file_path"
+                ],  # Store file path in document status
+            }
+            for id_, content_data in contents.items()
+        }
+
+        # 4. Filter out already processed documents
+        # Get docs ids
+        all_new_doc_ids = set(new_docs.keys())
+        # Exclude IDs of documents that are already in progress
+        unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
+
+        # Log ignored document IDs
+        ignored_ids = [
+            doc_id for doc_id in unique_new_doc_ids if doc_id not in new_docs
+        ]
+        if ignored_ids:
+            logger.warning(
+                f"Ignoring {len(ignored_ids)} document IDs not found in new_docs"
+            )
+            for doc_id in ignored_ids:
+                logger.warning(f"Ignored document ID: {doc_id}")
+
+        # Filter new_docs to only include documents with unique IDs
+        new_docs = {
+            doc_id: new_docs[doc_id]
+            for doc_id in unique_new_doc_ids
+            if doc_id in new_docs
+        }
+
+        if not new_docs:
+            logger.info("No new unique documents were found.")
+            return
+
+        # 5. Store status document
+        await self.doc_status.upsert(new_docs)
+        logger.info(f"Stored {len(new_docs)} new unique documents")
+
+
     async def apipeline_process_enqueue_documents(
         self,
+        file_paths: list,
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
-        file_paths: list = None
     ) -> None:
         """
         Process pending documents using llama_parse for chunking while maintaining screenshot_paths.
@@ -262,9 +405,6 @@ class LightRAG_EXTENSIONS(LightRAG):
                                     doc_id: {
                                         "status": DocStatus.PROCESSING,
                                         "chunks_count": len(chunks),
-                                        "content": status_doc.content,
-                                        "content_summary": status_doc.content_summary,
-                                        "content_length": status_doc.content_length,
                                         "created_at": status_doc.created_at,
                                         "updated_at": datetime.now(timezone.utc).isoformat(),
                                         "file_path": file_path,
@@ -312,8 +452,6 @@ class LightRAG_EXTENSIONS(LightRAG):
                                     "status": DocStatus.FAILED,
                                     "error": str(e),
                                     "content": status_doc.content,
-                                    "content_summary": status_doc.content_summary,
-                                    "content_length": status_doc.content_length,
                                     "created_at": status_doc.created_at,
                                     "updated_at": datetime.now(timezone.utc).isoformat(),
                                     "file_path": file_path,
@@ -341,9 +479,6 @@ class LightRAG_EXTENSIONS(LightRAG):
                                 doc_id: {
                                     "status": DocStatus.PROCESSED,
                                     "chunks_count": len(chunks),
-                                    "content": status_doc.content,
-                                    "content_summary": status_doc.content_summary,
-                                    "content_length": status_doc.content_length,
                                     "created_at": status_doc.created_at,
                                     "updated_at": datetime.now(timezone.utc).isoformat(),
                                     "file_path": file_path,
@@ -374,9 +509,6 @@ class LightRAG_EXTENSIONS(LightRAG):
                                 doc_id: {
                                     "status": DocStatus.FAILED,
                                     "error": str(e),
-                                    "content": status_doc.content,
-                                    "content_summary": status_doc.content_summary,
-                                    "content_length": status_doc.content_length,
                                     "created_at": status_doc.created_at,
                                     "updated_at": datetime.now().isoformat(),
                                     "file_path": file_path,
@@ -469,7 +601,7 @@ class LightRAG_EXTENSIONS(LightRAG):
         file_path = getattr(parsed_doc, "file_name", "unknown_file")
         doc_id = os.path.splitext(os.path.basename(file_path))[0]
 
-        screenshot_dir = f"{SCREENSHOT_DIR}/{doc_id}"
+        screenshot_dir = f"{self.screenshot_dir}/{doc_id}"
         os.makedirs(screenshot_dir, exist_ok=True)
 
         # Save all images (screenshots and object images) for this doc
@@ -528,35 +660,107 @@ class LightRAG_EXTENSIONS(LightRAG):
             query (str): The query to be executed.
             param (QueryParam): Configuration parameters for query execution.
                 If param.model_func is provided, it will be used instead of the global model.
-            prompt (Optional[str]): Custom prompts for fine-tuned control over the system's behavior. Defaults to None, which uses PROMPTS["rag_response"].
+            system_prompt (Optional[str]): Custom prompts for fine-tuned control over the system's behavior. Defaults to None, which uses PROMPTS["rag_response"].
 
         Returns:
             str: The result of the query execution.
         """
-        # If a custom model is provided in param, temporarily update global config
-        global_config = asdict(self)
-        # Save original query for vector search
-        param.original_query = query
+        # Retrieve context
+        context = await self.aretrieve_context(query, param)
+        
+        # Handle early return for context-only requests
+        if param.only_need_context:
+            if context is not None:
+                return context
+            else:
+                return PROMPTS["fail_response"]
+        
+        # Generate response
+        response = await self.agenerate_response(query, context, param, system_prompt)
+        
+        await self._query_done()
+        return response
 
+    async def aretrieve_context(
+        self,
+        query: str,
+        param: QueryParam = QueryParam(),
+    ) -> str | None:
+        """
+        Retrieve context/chunks for a query based on the specified mode.
+        
+        Args:
+            query (str): The query to retrieve context for.
+            param (QueryParam): Configuration parameters for query execution.
+            
+        Returns:
+            str | None: The retrieved context or None if no context could be built.
+        """
+        global_config = asdict(self)
+        param.original_query = query
+        
         if param.mode in ["local", "global", "hybrid", "mix"]:
-            response = await kg_query(
-                query.strip(),
-                self.chunk_entity_relation_graph,
-                self.entities_vdb,
-                self.relationships_vdb,
-                self.text_chunks,
-                param,
-                global_config,
+            return await kg_query_chunks_only(
+                query=query.strip(),
+                knowledge_graph_inst=self.chunk_entity_relation_graph,
+                entities_vdb=self.entities_vdb,
+                relationships_vdb=self.relationships_vdb,
+                text_chunks_db=self.text_chunks,
+                query_param=param,
+                global_config=global_config,
                 hashing_kv=self.llm_response_cache,
-                system_prompt=system_prompt,
                 chunks_vdb=self.chunks_vdb,
             )
         elif param.mode == "naive":
-            response = await naive_query(
-                query.strip(),
-                self.chunks_vdb,
-                param,
-                global_config,
+            return await naive_query_chunks_only(
+                query=query.strip(),
+                chunks_vdb=self.chunks_vdb,
+                query_param=param,
+                global_config=global_config,
+                hashing_kv=self.llm_response_cache,
+            )
+        elif param.mode == "bypass":
+            # Bypass mode doesn't need context retrieval
+            return None
+        else:
+            raise ValueError(f"Unknown mode {param.mode}")
+
+    async def agenerate_response(
+        self,
+        query: str,
+        context: str | None,
+        param: QueryParam = QueryParam(),
+        system_prompt: str | None = None,
+    ) -> str | AsyncIterator[str]:
+        """
+        Generate a response using the provided context and query.
+        
+        Args:
+            query (str): The original query.
+            context (str | None): The retrieved context.
+            param (QueryParam): Configuration parameters for query execution.
+            system_prompt (str | None): Custom system prompt.
+            
+        Returns:
+            str | AsyncIterator[str]: The generated response.
+        """
+        global_config = asdict(self)
+        
+        if param.mode in ["local", "global", "hybrid", "mix"]:
+            return await kg_query_generate_response(
+                query=query.strip(),
+                context=context,
+                query_param=param,
+                global_config=global_config,
+                hashing_kv=self.llm_response_cache,
+                system_prompt=system_prompt,
+            )
+        elif param.mode == "naive":
+            return await naive_query_generate_response(
+                query=query.strip(),
+                context=context,
+                query_param=param,
+                global_config=global_config,
                 hashing_kv=self.llm_response_cache,
                 system_prompt=system_prompt,
             )
@@ -567,7 +771,7 @@ class LightRAG_EXTENSIONS(LightRAG):
             use_llm_func = partial(use_llm_func, _priority=8)
 
             param.stream = True if param.stream is None else param.stream
-            response = await use_llm_func(
+            return await use_llm_func(
                 query.strip(),
                 system_prompt=system_prompt,
                 history_messages=param.conversation_history,
@@ -575,7 +779,6 @@ class LightRAG_EXTENSIONS(LightRAG):
             )
         else:
             raise ValueError(f"Unknown mode {param.mode}")
-        await self._query_done()
-        return response
+
 
     
