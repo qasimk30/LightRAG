@@ -1,9 +1,13 @@
 aiohttp
 configparser
 future
+fastmcp
 
 # Additional Packages for export Functionality
 pandas>=2.0.0
+
+openai==1.55.3
+ollama
 
 # Extra libraries are installed when needed using pipmaster
 
@@ -30,8 +34,16 @@ google-genai
 
 
 nano-vectordb
-
-
+faiss-cpu
+chromadb
+gremlinpython
+neo4j
+networkx
+asyncpg
+qdrant-client
+redis
+pymysql
+sqlalchemy
 
 aiofiles
 ascii_colors
@@ -41,10 +53,8 @@ dotenv
 fastapi
 graspologic>=3.4.1
 httpcore
-httpx
 jiter
 numpy
-openai
 passlib[bcrypt]
 pipmaster
 pydantic

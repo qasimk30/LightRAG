@@ -85,7 +85,6 @@ config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
 
 
-@final
 @dataclass
 class LightRAG:
     """LightRAG: Simple and Fast Retrieval-Augmented Generation."""
@@ -545,7 +544,7 @@ class LightRAG:
         )
 
     def _get_storage_class(self, storage_name: str) -> Callable[..., Any]:
-        import_path = STORAGES[storage_name]
+        import_path = STORAGES[storage_name] 
         storage_class = lazy_external_import(import_path, storage_name)
         return storage_class
 

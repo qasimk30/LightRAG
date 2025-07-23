@@ -61,7 +61,7 @@ from extensions.operate_extension import (
     naive_query_chunks_only,
     naive_query_generate_response,
 )
-from lightrag.prompt import GRAPH_FIELD_SEP
+from lightrag.prompt import GRAPH_FIELD_SEP, PROMPTS
 from lightrag.utils import (
     Tokenizer,
     TiktokenTokenizer,
@@ -78,14 +78,26 @@ from lightrag.utils import (
 )
 from lightrag.types import KnowledgeGraph
 from lightrag.lightrag import LightRAG
-from dotenv import load_dotenv
 
 from llama_cloud_services import LlamaParse
 
 class LightRAG_EXTENSIONS(LightRAG):
-    def __init__(self, *args, screenshot_path=None, **kwargs):
+    def __init__(self, *args, screenshot_path=None, Lamma_Key = None, storage_params, **kwargs):
         self.screenshot_dir = screenshot_path
 
+        # Extract and map storage_params explicitly
+        kv_storage = storage_params.get("kv_storage", "JsonKVStorage")
+        vector_storage = storage_params.get("vector_storage", "NanoVectorDBStorage")
+        graph_storage = storage_params.get("graph_storage", "NetworkXStorage")
+        doc_status_storage = storage_params.get("doc_status_storage", "JsonDocStatusStorage")
+
+        # Inject these into kwargs so LightRAG base class accepts them
+        kwargs.update({
+            "kv_storage": kv_storage,
+            "vector_storage": vector_storage,
+            "graph_storage": graph_storage,
+            "doc_status_storage": doc_status_storage,
+        })
         # Call the original LightRAG initializer with the rest of the args
         super().__init__(*args, **kwargs)
         self.entities_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
@@ -110,12 +122,9 @@ class LightRAG_EXTENSIONS(LightRAG):
             meta_fields={"full_doc_id", "content", "file_path", "screenshot_path"},
         )
 
-        load_dotenv()
-        lamma_cloud = os.getenv("LAMMA_CLOUD")
-
         # Initialize llama_parse 
         self.parser = LlamaParse(
-            api_key=lamma_cloud,
+            api_key=Lamma_Key,
             result_type="markdown",  # or "text" depending on your needs
             take_screenshot=True, 
         )
@@ -249,6 +258,7 @@ class LightRAG_EXTENSIONS(LightRAG):
             }
             for id_, content_data in contents.items()
         }
+
 
         # 4. Filter out already processed documents
         # Get docs ids
@@ -405,6 +415,8 @@ class LightRAG_EXTENSIONS(LightRAG):
                                     doc_id: {
                                         "status": DocStatus.PROCESSING,
                                         "chunks_count": len(chunks),
+                                        "content_summary": file_path,
+                                        "content_length": len(file_path),
                                         "created_at": status_doc.created_at,
                                         "updated_at": datetime.now(timezone.utc).isoformat(),
                                         "file_path": file_path,
@@ -452,6 +464,8 @@ class LightRAG_EXTENSIONS(LightRAG):
                                     "status": DocStatus.FAILED,
                                     "error": str(e),
                                     "content": status_doc.content,
+                                    "content_summary": file_path,
+                                    "content_length": len(file_path),
                                     "created_at": status_doc.created_at,
                                     "updated_at": datetime.now(timezone.utc).isoformat(),
                                     "file_path": file_path,
@@ -480,6 +494,8 @@ class LightRAG_EXTENSIONS(LightRAG):
                                     "status": DocStatus.PROCESSED,
                                     "chunks_count": len(chunks),
                                     "created_at": status_doc.created_at,
+                                    "content_summary": file_path,
+                                    "content_length": len(file_path),
                                     "updated_at": datetime.now(timezone.utc).isoformat(),
                                     "file_path": file_path,
                                 }
@@ -509,6 +525,8 @@ class LightRAG_EXTENSIONS(LightRAG):
                                 doc_id: {
                                     "status": DocStatus.FAILED,
                                     "error": str(e),
+                                    "content_summary": file_path,
+                                    "content_length": len(file_path),
                                     "created_at": status_doc.created_at,
                                     "updated_at": datetime.now().isoformat(),
                                     "file_path": file_path,

@@ -305,11 +305,11 @@ def initialize_share_data(workers: int = 1):
         _async_locks
 
     # Check if already initialized
-    if _initialized:
-        direct_log(
-            f"Process {os.getpid()} Shared-Data already initialized (multiprocess={_is_multiprocess})"
-        )
-        return
+    # if _initialized:
+    #     direct_log(
+    #         f"Process {os.getpid()} Shared-Data already initialized (multiprocess={_is_multiprocess})"
+    #     )
+    #     return
 
     _workers = workers
 

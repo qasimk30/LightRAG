@@ -552,10 +552,6 @@ class DocProcessingStatus:
 
     content: str
     """Original content of the document"""
-    content_summary: str
-    """First 100 chars of document content, used for preview"""
-    content_length: int
-    """Total length of document"""
     file_path: str
     """File path of the document"""
     status: DocStatus
@@ -564,6 +560,10 @@ class DocProcessingStatus:
     """ISO format timestamp when document was created"""
     updated_at: str
     """ISO format timestamp when document was last updated"""
+    content_summary: str | None = None
+    """First 100 chars of document content, used for preview"""
+    content_length: int | None = None
+    """Total length of document"""
     chunks_count: int | None = None
     """Number of chunks after splitting, used for processing"""
     error: str | None = None
